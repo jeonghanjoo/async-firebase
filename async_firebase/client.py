@@ -88,10 +88,10 @@ class AsyncFirebaseClient:
 
     @staticmethod
     def assemble_push_notification(
-        *,
-        apns_config: t.Optional[APNSConfig],
-        message: Message,
-        dry_run: bool,
+            *,
+            apns_config: t.Optional[APNSConfig],
+            message: Message,
+            dry_run: bool,
     ) -> t.Dict[str, t.Any]:
         """
         Assemble ``messages.PushNotification`` object properly.
@@ -544,6 +544,69 @@ class AsyncFirebaseClient:
             raise ValueError("Wrong return type, perhaps because of a response handler misuse.")
         return response
 
+    async def push_message(  # pylint: disable=too-many-locals
+            self,
+            message: Message,
+            dry_run: bool = False,
+    ) -> FcmPushResponse:
+        """
+        Send push notification.
+
+        :param message: Message to send
+        :param dry_run: indicating whether to run the operation in dry run mode (optional). Flag for testing the request
+            without actually delivering the message. Default to ``False``.
+
+        :raises:
+
+            ValueError is ``messages.PushNotification`` payload cannot be assembled
+
+        :return: response from Firebase. Example of response:
+
+            success::
+
+                {
+                    'name': 'projects/mobile-app/messages/0:1612788010922733%7606eb247606eb24'
+                }
+
+            failure::
+
+                {
+                    'error': {
+                        'code': 400,
+                        'details': [
+                            {
+                                '@type': 'type.googleapis.com/google.rpc.BadRequest',
+                                'fieldViolations': [
+                                    {
+                                        'description': 'Value type for APS key [badge] is a number.',
+                                        'field': 'message.apns.payload.aps.badge'
+                                    }
+                                ]
+                            },
+                            {
+                                '@type': 'type.googleapis.com/google.firebase.fcm.v1.FcmError',
+                                'errorCode': 'INVALID_ARGUMENT'
+                            }
+                        ],
+                        'message': 'Value type for APS key [badge] is a number.',
+                        'status': 'INVALID_ARGUMENT'
+                    }
+                }
+        """
+        push_notification = self.assemble_push_notification(apns_config=None,
+                                                            dry_run=dry_run,
+                                                            message=message)
+
+        response = await self._send_request(
+            uri=self.FCM_ENDPOINT.format(project_id=self._credentials.project_id),  # type: ignore
+            json_payload=push_notification,
+            headers=await self._prepare_headers(),
+            response_handler=FcmPushResponseHandler(),
+        )
+        if not isinstance(response, FcmPushResponse):
+            raise ValueError("Wrong return type, perhaps because of a response handler misuse.")
+        return response
+
     async def push_multicast(
         self,
         device_tokens: t.Union[t.List[str], t.Tuple[str]],
@@ -595,6 +658,64 @@ class AsyncFirebaseClient:
                     webpush=webpush,
                     apns=apns,
                 ),
+            )
+            body = self._serialize_batch_request(
+                httpx.Request(
+                    method="POST",
+                    url=urljoin(
+                        self.BASE_URL, self.FCM_ENDPOINT.format(project_id=self._credentials.project_id)  # type: ignore
+                    ),
+                    headers=await self._prepare_headers(),
+                    content=json.dumps(push_notification),
+                )
+            )
+            msg.set_payload(body)
+            multipart_message.attach(msg)
+
+        # encode the body: note that we can't use `as_string`, because it plays games with `From ` lines.
+        body = serialize_mime_message(multipart_message, mangle_from=False)
+
+        batch_response = await self._send_request(
+            uri=self.FCM_BATCH_ENDPOINT,
+            content=body,
+            headers={"Content-Type": f"multipart/mixed; boundary={multipart_message.get_boundary()}"},
+            response_handler=FcmPushMulticastResponseHandler(),
+        )
+        if not isinstance(batch_response, FcmPushMulticastResponse):
+            raise ValueError("Wrong return type, perhaps because of a response handler misuse.")
+        return batch_response
+
+    async def push_all_messages(
+            self,
+            messages: t.List[Message],
+            *,
+            dry_run: bool = False,
+    ) -> FcmPushMulticastResponse:
+        """
+        Send Multicast push notification.
+        :param messages: List of messages to send
+        :param dry_run: indicating whether to run the operation in dry run mode (optional). Flag for testing the request
+            without actually delivering the message. Default to ``False``.
+        """
+
+        if len(messages) > MULTICAST_MESSAGE_MAX_DEVICE_TOKENS:
+            raise ValueError(
+                f"A single ``messages.MulticastMessage`` may contain up to {MULTICAST_MESSAGE_MAX_DEVICE_TOKENS} "
+                "device tokens."
+            )
+
+        multipart_message = MIMEMultipart("mixed")
+        # Message should not write out it's own headers.
+        setattr(multipart_message, "_write_headers", lambda self: None)
+
+        for message in messages:
+            msg = MIMENonMultipart("application", "http")
+            msg["Content-Transfer-Encoding"] = "binary"
+            msg["Content-ID"] = self._get_request_id()
+            push_notification = self.assemble_push_notification(
+                apns_config=None,
+                dry_run=dry_run,
+                message=message
             )
             body = self._serialize_batch_request(
                 httpx.Request(

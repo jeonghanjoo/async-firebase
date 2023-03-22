@@ -11,7 +11,7 @@ maintainers = [
     "Aleksandr Omyshev <oomyshev@healthjoy.com>"
 ]
 readme = "README.md"
-repository = "https://github.com/healthjoy/async-firebase"
+repository = "https://github.com/jeonghanjoo/async-firebase"
 keywords = ["async", "asyncio", "firebase", "fcm", "python3", "push-notifications"]
 classifiers = [
     "Development Status :: 5 - Production/Stable",
